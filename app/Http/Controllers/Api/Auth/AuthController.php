@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api\Auth;
 
 use App\Http\Controllers\Controller;
 use App\Http\Resources\UserResource;
+use App\Mail\VerificationCodeMail;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -124,6 +125,10 @@ class AuthController extends Controller
         ], Response::HTTP_OK);
     }
 
+    /**
+     * Public sign-up. It always creates a customer ("user") account; staff accounts are
+     * created by an administrator through the users endpoints.
+     */
     public function register(Request $request)
     {
         $validator = Validator($request->all(), [
@@ -131,10 +136,12 @@ class AuthController extends Controller
             'email' => 'required|email|unique:users,email',
             'phone' => 'required|string|min:10|max:15|unique:users,phone',
             'password' => 'required|string|min:6',
-            'role' => 'required|string|exists:roles,name',
+            'role' => 'nullable|string|in:user',
             'remember' => 'nullable|boolean',
-
+        ], [
+            'role.in' => 'Only an administrator can create accounts with that role.',
         ]);
+
         if ($validator->fails()) {
             return response()->json([
                 'message' => $validator->getMessageBag()->first(),
@@ -147,15 +154,8 @@ class AuthController extends Controller
                 'phone' => $request->input('phone'),
                 'password' => Hash::make($request->input('password')),
             ]);
-//            $token = $user->createToken('User-Api-Token');
-//            $user->setAttribute('token', $token->accessToken);
-//            $token = $user->createToken('User-Api-Token')->plainTextToken;
-            $roleName = $request->input('role');
-            // Determine correct guard for role assignment
-//            $guardName = $roleName === 'admin' || $roleName === 'super admin' ? 'admin' : 'user';
-// Find the role with the correct guard
-            $role = Role::where('name', $roleName)->first();
-// Assign the correct role
+
+            $role = Role::findOrCreate('user', 'user');
             $user->assignRole($role->name);
             $isSaved = $user->save();
             return response()->json(["message" => $isSaved ?
@@ -163,11 +163,9 @@ class AuthController extends Controller
                     'Register Successfuly',
                     'user' => $user,
                     'role' => $role,
-//                    'token' => $token,
                 ]
                 : 'Register Failed!'
             ], $isSaved ? Response::HTTP_CREATED : Response::HTTP_BAD_REQUEST);
-//            return response()->json();
         }
     }
 
@@ -214,62 +212,65 @@ class AuthController extends Controller
         }
     }
 
+    /**
+     * Email a password reset code. The response is the same whether or not the address
+     * belongs to an account, so the endpoint cannot be used to find registered emails.
+     */
     public function forgotPassword(Request $request)
     {
         $validator = Validator($request->all(), [
-            'email' => 'required|exists:users,email'
+            'email' => 'required|email',
         ]);
-        if (!$validator->fails()) {
-            $randomInt = random_int(1000, 9999);
-            $user = User::where('email', '=', $request->input('email'))->first();
-            $user->verification_code = Hash::make($randomInt);
-            $isSaved = $user->save();
-            return response()->json([
-                'status' => $isSaved,
-                'message' => $isSaved ? 'Password reset code sent success'
-                    : 'Failed to sent Password reset code',
-                'code' => $randomInt
-            ], $isSaved ? Response::HTTP_OK : Response::HTTP_BAD_REQUEST);
-        } else {
+
+        if ($validator->fails()) {
             return response()->json([
                 'message' => $validator->getMessageBag()->first()
             ], Response::HTTP_BAD_REQUEST);
         }
+
+        $user = User::where('email', '=', $request->input('email'))->first();
+        if ($user) {
+            $code = $user->issueVerificationCode();
+            Mail::to($user->email)->send(new VerificationCodeMail($code, 'reset your password'));
+        }
+
+        return response()->json([
+            'status' => true,
+            'message' => 'If the email belongs to an account, a password reset code has been sent to it',
+        ], Response::HTTP_OK);
     }
 
     public function resetPassword(Request $request)
     {
         $validator = Validator($request->all(), [
-            'email' => 'required|exists:users,email',
+            'email' => 'required|email',
             'code' => 'required|numeric|digits:4',
-            'password' => 'required|string|confirmed',
+            'password' => 'required|string|min:6|confirmed',
         ]);
-        if (!$validator->fails()) {
-            $user = User::where('email', '=', $request->input('email'))->first();
-            if (!is_null($user->verification_code)) {
-                if (Hash::check($request->input('code'), $user->verification_code)) {
-                    $user->verification_code = null;
-                    $user->password = Hash::make($request->input('password'));
-                    $isSaved = $user->save();
-                    return response()->json([
-                        'message' => $isSaved ? 'Password reset success'
-                            : 'Failed to reset Password',
-                    ], $isSaved ? Response::HTTP_OK : Response::HTTP_BAD_REQUEST);
-                } else {
-                    return response()->json([
-                        'message' => 'reset code error, try again'
-                    ], Response::HTTP_BAD_REQUEST);
-                }
-            } else {
-                return response()->json([
-                    'message' => 'No forget password request exist, process denied'
-                ], Response::HTTP_BAD_REQUEST);
-            }
-        } else {
+
+        if ($validator->fails()) {
             return response()->json([
                 'message' => $validator->getMessageBag()->first()
             ], Response::HTTP_BAD_REQUEST);
         }
+
+        $user = User::where('email', '=', $request->input('email'))->first();
+        if (!$user || !$user->verificationCodeMatches((string) $request->input('code'))) {
+            return response()->json([
+                'message' => 'reset code error, try again'
+            ], Response::HTTP_BAD_REQUEST);
+        }
+
+        $user->clearVerificationCode();
+        $user->password = Hash::make($request->input('password'));
+        $isSaved = $user->save();
+        // Signing in again is required everywhere once the password has been reset
+        $user->tokens()->delete();
+
+        return response()->json([
+            'message' => $isSaved ? 'Password reset success'
+                : 'Failed to reset Password',
+        ], $isSaved ? Response::HTTP_OK : Response::HTTP_BAD_REQUEST);
     }
 
     public function changePassword(Request $request)
@@ -355,10 +356,12 @@ class AuthController extends Controller
 //        }
 //    }
 
+    /**
+     * Step 1 of changing the signed-in user's email: send a code to the new address.
+     */
     public function initiateEmailChange(Request $request)
     {
         $validator = Validator::make($request->all(), [
-            'old_email' => 'required|email|exists:users,email',
             'new_email' => 'required|email|unique:users,email',
         ]);
 
@@ -368,26 +371,20 @@ class AuthController extends Controller
             ], Response::HTTP_BAD_REQUEST);
         }
 
-        $user = User::where('email', $request->old_email)->first();
-
-        // Generate and send verification code to NEW email
-        $verificationCode = random_int(1000, 9999);
-        $user->verification_code = Hash::make($verificationCode);
-        $user->save();
-        // Send email to new email address
-        Mail::to($request->new_email)->send(new EmailVerificationCodeMail($verificationCode));
+        $code = $request->user()->issueVerificationCode();
+        Mail::to($request->input('new_email'))->send(new VerificationCodeMail($code, 'confirm your new email address'));
 
         return response()->json([
             'message' => 'Verification code sent to new email address',
-            'verificationCode' => $verificationCode,
-//            'user' => $user
         ], Response::HTTP_OK);
     }
 
+    /**
+     * Step 2: confirm the code and switch the signed-in user's email.
+     */
     public function confirmEmailChange(Request $request)
     {
         $validator = Validator::make($request->all(), [
-            'old_email' => 'required|email|exists:users,email',
             'new_email' => 'required|email|unique:users,email',
             'code' => 'required|numeric|digits:4',
         ]);
@@ -398,16 +395,15 @@ class AuthController extends Controller
             ], Response::HTTP_BAD_REQUEST);
         }
 
-        $user = User::where('email', $request->old_email)->first();
-
-        if (!Hash::check($request->code, $user->verification_code)) {
+        $user = $request->user();
+        if (!$user->verificationCodeMatches((string) $request->input('code'))) {
             return response()->json([
                 'message' => 'Invalid verification code'
             ], Response::HTTP_BAD_REQUEST);
         }
 
-        $user->email = $request->new_email;
-        $user->verification_code = null;
+        $user->email = $request->input('new_email');
+        $user->clearVerificationCode();
         $user->save();
 
         return response()->json([
@@ -415,68 +411,14 @@ class AuthController extends Controller
         ], Response::HTTP_OK);
     }
 
-//    public function changePhone(Request $request)
-//    {
-//        $validator = Validator($request->all(), [
-//            'old_phone' => 'required|numeric|digits:11|exists:users,phone',
-//            'phone' => 'required|numeric|digits_between:10,12|unique:users,phone',
-//            'code' => 'required|numeric|digits:4',
-//        ]);
-//        if (!$validator->fails()) {
-//            $randomInt = random_int(1000, 9999);
-//            $user = $request->user();
-//            $user = User::where('phone', '=', $request->input('old_phone'))->first();
-//            $user->verification_code = Hash::make($randomInt);
-//            $isSaved = $user->save();
-////            review the code and enhances it
-//            if ($isSaved) {
-//                if ($user->phone !== $request->input('old_phone')) {
-//                    return response()->json([
-//                        'success' => false,
-//                        'message' => 'The old phone number does not match.',
-//                    ], Response::HTTP_BAD_REQUEST); // 400 Bad Request
-//                }
-////            exits review
-//                if (!is_null($user->verification_code)) {
-//                    if (Hash::check($request->input('code'), $user->verification_code)) {
-//                        $user->verification_code = null;
-////                    $user->password = Hash::make($request->input('password'));
-//                        $user->phone = $request->input('phone');
-//                        $isSaved = $user->save();
-//                        return response()->json([
-//                            'message' => $isSaved ? 'Phone Changed success'
-//                                : 'Failed to Change Phone',
-//                        ], $isSaved ? Response::HTTP_OK : Response::HTTP_BAD_REQUEST);
-//                    } else {
-//                        return response()->json([
-//                            'message' => 'reset code error, try again'
-//                        ], Response::HTTP_BAD_REQUEST);
-//                    }
-//                } else {
-//                    return response()->json([
-//                        'message' => 'No Change Phone request exist, process denied'
-//                    ], Response::HTTP_BAD_REQUEST);
-//                }
-//
-//            } else {
-//                return response()->json([
-//                    'message' => $validator->getMessageBag()->first()
-//                ], Response::HTTP_BAD_REQUEST);
-//            }
-////            $user->phone = $request->input('phone');
-////            $isSaved = $user->save();
-//        } else {
-//            return response()->json([
-//                'message' => $validator->getMessageBag()->first()
-//            ], Response::HTTP_BAD_REQUEST);
-//        }
-//    }
-
+    /**
+     * Step 1 of changing the signed-in user's phone number. No SMS provider is configured,
+     * so the code goes to the account's email address.
+     */
     public function initiatePhoneChange(Request $request)
     {
         $validator = Validator::make($request->all(), [
-            'old_phone' => 'required|numeric|digits:11|exists:users,phone',
-            'new_phone' => 'required|numeric|digits_between:10,12|unique:users,phone',
+            'new_phone' => 'required|numeric|digits_between:10,15|unique:users,phone',
         ]);
 
         if ($validator->fails()) {
@@ -485,26 +427,22 @@ class AuthController extends Controller
             ], Response::HTTP_BAD_REQUEST);
         }
 
-        $user = User::where('phone', $request->old_phone)->first();
-
-        // Generate and send verification code to NEW phone
-        $verificationCode = random_int(1000, 9999);
-        $user->verification_code = Hash::make($verificationCode);
-        $user->save();
-
-        // Send SMS to new phone number (You'll need to implement your SMS service here)
-        // Example: $this->sendSms($request->new_phone, "Your verification code: $verificationCode");
+        $user = $request->user();
+        $code = $user->issueVerificationCode();
+        Mail::to($user->email)->send(new VerificationCodeMail($code, 'confirm your new phone number'));
 
         return response()->json([
-            'message' => 'Verification code sent to new phone number'
+            'message' => 'Verification code sent to your email address'
         ], Response::HTTP_OK);
     }
 
+    /**
+     * Step 2: confirm the code and switch the signed-in user's phone number.
+     */
     public function confirmPhoneChange(Request $request)
     {
         $validator = Validator::make($request->all(), [
-            'old_phone' => 'required|numeric|digits:11|exists:users,phone',
-            'new_phone' => 'required|numeric|digits_between:10,12|unique:users,phone',
+            'new_phone' => 'required|numeric|digits_between:10,15|unique:users,phone',
             'code' => 'required|numeric|digits:4',
         ]);
 
@@ -514,24 +452,19 @@ class AuthController extends Controller
             ], Response::HTTP_BAD_REQUEST);
         }
 
-        $user = User::where('phone', $request->old_phone)->first();
-
-        if (!Hash::check($request->code, $user->verification_code)) {
+        $user = $request->user();
+        if (!$user->verificationCodeMatches((string) $request->input('code'))) {
             return response()->json([
                 'message' => 'Invalid verification code'
             ], Response::HTTP_BAD_REQUEST);
         }
 
-        $user->phone = $request->new_phone;
-        $user->verification_code = null;
+        $user->phone = $request->input('new_phone');
+        $user->clearVerificationCode();
         $user->save();
 
         return response()->json([
             'message' => 'Phone number changed successfully'
         ], Response::HTTP_OK);
     }
-//    public function resetPhone(Request $request){}
-//    public function resetPasswordToken(Request $request){}
-//    public function resetPhoneToken(Request $request){}
-
 }

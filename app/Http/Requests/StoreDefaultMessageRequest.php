@@ -27,7 +27,7 @@ class StoreDefaultMessageRequest extends FormRequest
                 'string',
                 'min:3',
                 'max:255',
-                Rule::unique('default_messages', 'body')->ignore($this->id),
+                Rule::unique('default_messages', 'body')->ignore($this->route('default_message')),
             ],
             'parent_id' => ['nullable', 'integer', 'exists:default_messages,id'],
             'user_id' => ['nullable', 'integer', 'exists:users,id'],

@@ -35,9 +35,12 @@ class DefaultMessageController extends Controller
      */
     public function store(StoreDefaultMessageRequest $request)
     {
-        $is_saved = DefaultMessage::create($request->all());
+        $is_saved = DefaultMessage::create([
+            'body' => $request->input('body'),
+            'parent_id' => $request->input('parent_id'),
+            'user_id' => $request->input('user_id', $request->user()?->id),
+        ]);
         $default_message_created = DefaultMessage::with(['parent', 'user'])->find($is_saved->id);
-
         return response()->json([
             'message' => $is_saved ? 'Default Message Created Successfully' : 'Default Message not Created',
             'data' => $is_saved ? new DefaultMessageResource($default_message_created) : 'Default Message not Created',
@@ -50,7 +53,9 @@ class DefaultMessageController extends Controller
     public function show($id)
     {
         $default_message = DefaultMessage::with(['parent', 'user'])->find($id);
-
+        if (!$default_message) {
+            return $this->notFound();
+        }
         return new DefaultMessageResource($default_message);
     }
 
@@ -59,13 +64,22 @@ class DefaultMessageController extends Controller
      */
     public function update(UpdateDefaultMessageRequest $request, $id)
     {
-        $is_updated = DefaultMessage::find($id)->update($request->all())->save();
-        $default_message_updated = DefaultMessage::find($id)->with(['parent', 'user']);
+        $default_message = DefaultMessage::find($id);
+        if (!$default_message) {
+            return $this->notFound();
+        }
+        if ($request->filled('parent_id') && (int)$request->input('parent_id') === $default_message->id) {
+            return response()->json([
+                'message' => 'A default message cannot be its own parent',
+            ], Response::HTTP_BAD_REQUEST);
+        }
 
+        $is_updated = $default_message->update($request->only(['body', 'parent_id', 'user_id']));
+        $default_message_updated = DefaultMessage::with(['parent', 'user'])->find($id);
         return response()->json([
-            'message' => $is_updated ? 'Default Message Created Successfully' : 'Default Message not Created',
-            'data' => $is_updated ? new DefaultMessageResource($default_message_updated) : 'Default Message not Created',
-        ], $is_updated ? Response::HTTP_CREATED : Response::HTTP_BAD_REQUEST);
+            'message' => $is_updated ? 'Default Message Updated Successfully' : 'Default Message not Updated',
+            'data' => $is_updated ? new DefaultMessageResource($default_message_updated) : 'Default Message not Updated',
+        ], $is_updated ? Response::HTTP_OK : Response::HTTP_BAD_REQUEST);
     }
 
     /**
@@ -73,10 +87,26 @@ class DefaultMessageController extends Controller
      */
     public function destroy($id)
     {
-        $is_deleted = DefaultMessage::findById($id)->delete();
+        $default_message = DefaultMessage::find($id);
+        if (!$default_message) {
+            return $this->notFound();
+        }
+        if ($default_message->children()->exists()) {
+            return response()->json([
+                'message' => 'This default message has replies under it. Delete or move them first.',
+            ], Response::HTTP_CONFLICT);
+        }
 
+        $is_deleted = $default_message->delete();
         return response()->json([
-            $is_deleted ? 'Default Message Deleted Successfully' : 'Default Message not Deleted',
+            'message' => $is_deleted ? 'Default Message Deleted Successfully' : 'Default Message not Deleted',
         ], $is_deleted ? Response::HTTP_OK : Response::HTTP_BAD_REQUEST);
+    }
+
+    private function notFound()
+    {
+        return response()->json([
+            'message' => 'Default Message not found',
+        ], Response::HTTP_NOT_FOUND);
     }
 }
