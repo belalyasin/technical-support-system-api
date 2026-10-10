@@ -201,7 +201,7 @@ class AuthController extends Controller
 //                    'roles' => $user->getRoleNames(),
 //                    'permissions' => $user->getAllPermissions()->pluck('name'),
 //                ]
-                'data' => new UserResource($user)
+                'data' => new UserResource($user->load('roles'))
             ], Response::HTTP_OK);
 
         } catch (\Exception $e) {

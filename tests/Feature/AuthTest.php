@@ -56,7 +56,8 @@ class AuthTest extends TestCase
         $this->withToken($response->json('token'))
             ->getJson('/api/current-user')
             ->assertOk()
-            ->assertJsonPath('data.email', $user->email);
+            ->assertJsonPath('data.email', $user->email)
+            ->assertJsonPath('data.roles.0', 'user');
     }
 
     public function test_login_rejects_a_wrong_password(): void

@@ -31,6 +31,8 @@ php artisan serve
 
 Seeding creates the three roles and a first super admin: `admin@example.com` with the password `password`. Change that password before using the system for real.
 
+Browser requests are accepted from `http://localhost:4200` (the Angular front end in development). Add other origins in `config/cors.php`.
+
 With `MAIL_MAILER=log`, verification codes are written to `storage/logs/laravel.log` instead of being emailed, which is handy during development.
 
 ## Tests
@@ -58,7 +60,7 @@ All routes are under `/api`. Send `Accept: application/json`. Routes other than 
 
 | Method | Route | Body |
 | --- | --- | --- |
-| GET | `/current-user` | |
+| GET | `/current-user` | Returns the signed-in user with their `roles` |
 | POST | `/logout` | |
 | PUT | `/change-password` | `password`, `new_password`, `new_password_confirmation` |
 | POST | `/initiateEmailChange` | `new_email`. Emails a code to the new address |
